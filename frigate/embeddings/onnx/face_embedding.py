@@ -149,9 +149,7 @@ class ArcfaceEmbedding(BaseEmbedding):
         # is downloaded on the detector side when the queues are wired up.
         if self._uses_hailo_proxy():
             self._load_model_and_utils()
-            logger.debug(
-                "ArcFace embeddings will run via the Hailo detector proxy"
-            )
+            logger.debug("ArcFace embeddings will run via the Hailo detector proxy")
             return
 
         files_names = list(self.download_urls.keys())

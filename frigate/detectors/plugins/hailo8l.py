@@ -262,9 +262,7 @@ class _HailoFaceInferenceEngine:
             for name in self._output_names
         }
 
-        bindings = self._configured.create_bindings(
-            output_buffers=output_buffers
-        )
+        bindings = self._configured.create_bindings(output_buffers=output_buffers)
         bindings.input().set_buffer(np.ascontiguousarray(nhwc_uint8[0]))
 
         self._configured.wait_for_async_ready(timeout_ms=10000)
@@ -282,9 +280,7 @@ class _HailoFaceInferenceEngine:
         done.wait(timeout=10.0)
 
         if error_holder["err"] is not None:
-            raise RuntimeError(
-                f"ArcFace inference failed: {error_holder['err']}"
-            )
+            raise RuntimeError(f"ArcFace inference failed: {error_holder['err']}")
 
         # Reshape the (only) output buffer to (1, 512) to match the ONNX
         # ArcFace model's output contract.

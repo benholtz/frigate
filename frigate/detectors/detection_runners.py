@@ -608,9 +608,7 @@ class HailoFaceModelRunner(BaseModelRunner):
 
         with self._lock:
             self._request_queue.put(tensor[0])
-            response = self._response_queue.get(
-                timeout=self.REQUEST_TIMEOUT_SECONDS
-            )
+            response = self._response_queue.get(timeout=self.REQUEST_TIMEOUT_SECONDS)
 
         if response is None:
             raise RuntimeError("Hailo face proxy returned no response")
