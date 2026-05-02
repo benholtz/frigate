@@ -558,68 +558,51 @@ class RKNNModelRunner(BaseModelRunner):
 
 
 class HailoModelRunner(BaseModelRunner):
-    """Run models on the Hailo NPU.
+    """Run ArcFace face embeddings on the Hailo NPU via an in-process IPC
+    proxy that runs inside the detector process.
 
-    Wraps the asynchronous HailoAsyncInference engine (originally written for
-    the YOLO detector path) with a synchronous request/response interface so
-    embeddings can call it from a worker process exactly like the ORT/RKNN
-    runners. The HailoRT scheduler (HailoSchedulingAlgorithm.ROUND_ROBIN)
-    multiplexes models on a single VDevice, so the detector and this runner
-    can share the chip without explicit coordination.
+    Why a proxy: Hailo-8 / 8L allow exactly one VDevice handle per chip per
+    process. The detector process already owns it for YOLO. Trying to claim
+    a second VDevice from the embeddings worker fails with
+    HAILO_OUT_OF_PHYSICAL_DEVICES (74). HailoRT's ROUND_ROBIN scheduler
+    multiplexes models on a single VDevice, but only inside the same
+    process; across processes you need either Hailo's multi-process service
+    or an in-band proxy. We picked the in-band proxy: HailoFaceProxyServer
+    (started inside the detector process when face_recognition.device ==
+    "hailo") loads the ArcFace HEF on the existing VDevice and exposes a
+    loopback TCP service. This runner is the client.
     """
 
     INPUT_NAME = "data"
+    # ArcFace MobileFaceNet input width — Hailo Model Zoo HEF is 112x112x3.
+    _DEFAULT_INPUT_WIDTH = 112
 
     def __init__(self, model_path: str, model_type: str = None):
+        # model_path is the HEF path that the detector side will load. The
+        # embeddings worker only needs it for the BaseModelRunner interface
+        # (caching, etc.); it never opens the file itself.
         self.model_path = model_path
         self.model_type = model_type
-        self._engine = None
-        self._worker = None
-        self._input_store = None
-        self._response_store = None
-        self._input_width = None
-        self._load_model()
+        self._client = None
+        self._connect()
 
-    def _load_model(self):
-        # Lazy imports keep the rest of the module importable on hosts
-        # without HailoRT installed.
-        from frigate.detectors.plugins.hailo8l import HailoAsyncInference
-        from frigate.object_detection.util import RequestStore, ResponseStore
-
-        self._input_store = RequestStore()
-        self._response_store = ResponseStore()
+    def _connect(self):
+        from frigate.embeddings.hailo_face_proxy import HailoFaceProxyClient
 
         try:
-            self._engine = HailoAsyncInference(
-                hef_path=self.model_path,
-                input_store=self._input_store,
-                output_store=self._response_store,
-                batch_size=1,
-                input_type="UINT8",
-            )
-        except Exception as e:
+            self._client = HailoFaceProxyClient()
+        except RuntimeError as e:
             raise RuntimeError(
-                f"Failed to initialize Hailo runner for {self.model_path}: {e}"
+                f"Could not reach the Hailo face proxy. The detector process "
+                f"must be running with face_recognition.device=hailo to expose "
+                f"it. Underlying error: {e}"
             )
-
-        # Cache input width from the HEF so callers can query without touching
-        # the engine while the worker is mid-inference.
-        input_shape = self._engine.get_input_shape()
-        # HEF input shape is (H, W, C) for image models.
-        self._input_width = int(input_shape[1]) if len(input_shape) >= 2 else 0
-
-        self._worker = threading.Thread(
-            target=self._engine.run,
-            name="hailo-runner",
-            daemon=True,
-        )
-        self._worker.start()
 
     def get_input_names(self) -> list[str]:
         return [self.INPUT_NAME]
 
     def get_input_width(self) -> int:
-        return self._input_width or 0
+        return self._DEFAULT_INPUT_WIDTH
 
     def run(self, input: dict[str, Any]) -> Any | None:
         if self.INPUT_NAME not in input:
@@ -629,10 +612,9 @@ class HailoModelRunner(BaseModelRunner):
 
         tensor = input[self.INPUT_NAME]
 
-        # The current Hailo embedding integration is ArcFace-shaped: callers
-        # produce NCHW float32 normalised to (x/127.5)-1. Hailo HEFs expect
-        # NHWC uint8 [0,255], so undo the normalisation at the boundary
-        # (mirrors the RKNN arcface path above).
+        # ArcFace pre-processing — callers produce NCHW float32 in
+        # (x/127.5)-1 range. Hailo HEFs expect NHWC uint8 [0,255]. Mirror
+        # the RKNN arcface path's inverse normalisation.
         if (
             self.model_type
             and "arcface" in self.model_type
@@ -641,28 +623,21 @@ class HailoModelRunner(BaseModelRunner):
             if tensor.shape[1] == 3:
                 tensor = np.transpose(tensor, (0, 2, 3, 1))
             tensor = ((tensor + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+        elif tensor.dtype != np.uint8:
+            tensor = tensor.astype(np.uint8)
 
-        # HailoAsyncInference processes one frame at a time (batch_size=1).
-        request_id = self._input_store.put(tensor[0])
+        if tensor.shape[0] != 1:
+            tensor = tensor[:1]
 
-        try:
-            _, embedding = self._response_store.get(request_id, timeout=10.0)
-        except TimeoutError:
-            raise RuntimeError(
-                f"Hailo inference timed out for {self.model_path}"
-            )
+        embedding = self._client.infer(tensor)
 
         # Match the ONNX runner's contract: list of arrays, one per output.
-        if isinstance(embedding, dict):
-            return list(embedding.values())
         return [embedding]
 
     def __del__(self):
-        # Signal the worker loop to exit cleanly. HailoAsyncInference.run()
-        # breaks out of its while loop when batch_data is None.
         try:
-            if self._input_store is not None:
-                self._input_store.input_queue.put(None)
+            if self._client is not None:
+                self._client.close()
         except Exception:
             pass
 
