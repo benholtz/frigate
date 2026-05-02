@@ -3,6 +3,8 @@ import os
 import queue
 import threading
 from abc import ABC, abstractmethod
+from multiprocessing import Queue
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -328,10 +330,19 @@ class FaceNetRecognizer(FaceRecognizer):
 
 
 class ArcFaceRecognizer(FaceRecognizer):
-    def __init__(self, config: FrigateConfig):
+    def __init__(
+        self,
+        config: FrigateConfig,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
+    ):
         super().__init__(config)
         self.mean_embs: dict[str, np.ndarray] = {}
-        self.face_embedder: ArcfaceEmbedding = ArcfaceEmbedding(config.face_recognition)
+        self.face_embedder: ArcfaceEmbedding = ArcfaceEmbedding(
+            config.face_recognition,
+            face_request_queue=face_request_queue,
+            face_response_queue=face_response_queue,
+        )
         self.model_builder_queue: queue.Queue | None = None
 
     def clear(self) -> None:

@@ -7,8 +7,9 @@ import os
 import sys
 import threading
 from json.decoder import JSONDecodeError
+from multiprocessing import Queue
 from multiprocessing.synchronize import Event as MpEvent
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import regex
 from pathvalidate import ValidationError, sanitize_filename
@@ -35,6 +36,8 @@ class EmbeddingProcess(FrigateProcess):
         config: FrigateConfig,
         metrics: DataProcessorMetrics | None,
         stop_event: MpEvent,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
     ) -> None:
         super().__init__(
             stop_event,
@@ -44,6 +47,8 @@ class EmbeddingProcess(FrigateProcess):
         )
         self.config = config
         self.metrics = metrics
+        self.face_request_queue = face_request_queue
+        self.face_response_queue = face_response_queue
 
     def run(self) -> None:
         self.pre_run_setup(self.config.logger)
@@ -51,6 +56,8 @@ class EmbeddingProcess(FrigateProcess):
             self.config,
             self.metrics,
             self.stop_event,
+            face_request_queue=self.face_request_queue,
+            face_response_queue=self.face_response_queue,
         )
         maintainer.start()
         maintainer.join()

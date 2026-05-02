@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+from multiprocessing import Queue
 from pathlib import Path
 from typing import Any, Optional
 
@@ -47,11 +48,15 @@ class FaceRealTimeProcessor(RealTimeProcessorApi):
         requestor: InterProcessRequestor,
         sub_label_publisher: EventMetadataPublisher,
         metrics: DataProcessorMetrics,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
     ):
         super().__init__(config, metrics)
         self.face_config = config.face_recognition
         self.requestor = requestor
         self.sub_label_publisher = sub_label_publisher
+        self.face_request_queue = face_request_queue
+        self.face_response_queue = face_response_queue
         self.face_detector: cv2.FaceDetectorYN | None = None
         self.requires_face_detection = "face" not in self.config.objects.all_objects
         self.person_face_history: dict[str, list[tuple[str, float, int]]] = {}
@@ -91,7 +96,11 @@ class FaceRealTimeProcessor(RealTimeProcessorApi):
         if self.face_config.model_size == "small":
             self.recognizer = FaceNetRecognizer(self.config)
         else:
-            self.recognizer = ArcFaceRecognizer(self.config)
+            self.recognizer = ArcFaceRecognizer(
+                self.config,
+                face_request_queue=self.face_request_queue,
+                face_response_queue=self.face_response_queue,
+            )
 
         self.recognizer.build()
 

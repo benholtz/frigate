@@ -2,11 +2,16 @@
 
 import logging
 import os
+from multiprocessing import Queue
+from typing import Optional
 
 import numpy as np
 
 from frigate.const import MODEL_CACHE_DIR
-from frigate.detectors.detection_runners import get_optimized_runner
+from frigate.detectors.detection_runners import (
+    HailoFaceModelRunner,
+    get_optimized_runner,
+)
 from frigate.embeddings.types import EnrichmentModelTypeEnum
 from frigate.log import suppress_stderr_during
 from frigate.util.downloader import ModelDownloader
@@ -115,7 +120,12 @@ class FaceNetEmbedding(BaseEmbedding):
 
 
 class ArcfaceEmbedding(BaseEmbedding):
-    def __init__(self, config: FaceRecognitionConfig):
+    def __init__(
+        self,
+        config: FaceRecognitionConfig,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
+    ):
         GITHUB_ENDPOINT = os.environ.get("GITHUB_ENDPOINT", "https://github.com")
         super().__init__(
             model_name="facedet",
@@ -125,10 +135,25 @@ class ArcfaceEmbedding(BaseEmbedding):
             },
         )
         self.config = config
+        self.face_request_queue = face_request_queue
+        self.face_response_queue = face_response_queue
         self.download_path = os.path.join(MODEL_CACHE_DIR, self.model_name)
         self.tokenizer = None
         self.feature_extractor = None
         self.runner = None
+
+        # When face_recognition.device is "hailo" the embeddings worker
+        # cannot run the model itself - the detector process holds the
+        # chip's only allowed VDevice handle. Skip the ONNX download path
+        # and use the HailoFaceModelRunner queue client instead. The HEF
+        # is downloaded on the detector side when the queues are wired up.
+        if self._uses_hailo_proxy():
+            self._load_model_and_utils()
+            logger.debug(
+                "ArcFace embeddings will run via the Hailo detector proxy"
+            )
+            return
+
         files_names = list(self.download_urls.keys())
 
         if not all(
@@ -147,8 +172,22 @@ class ArcfaceEmbedding(BaseEmbedding):
             self._load_model_and_utils()
             logger.debug(f"models are already downloaded for {self.model_name}")
 
+    def _uses_hailo_proxy(self) -> bool:
+        return (
+            self.config.device is not None
+            and self.config.device.lower() == "hailo"
+            and self.face_request_queue is not None
+            and self.face_response_queue is not None
+        )
+
     def _load_model_and_utils(self):
         if self.runner is None:
+            if self._uses_hailo_proxy():
+                self.runner = HailoFaceModelRunner(
+                    self.face_request_queue, self.face_response_queue
+                )
+                return
+
             if self.downloader:
                 self.downloader.wait_for_download()
 

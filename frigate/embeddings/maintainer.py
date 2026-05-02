@@ -5,8 +5,9 @@ import datetime
 import json
 import logging
 import threading
+from multiprocessing import Queue
 from multiprocessing.synchronize import Event as MpEvent
-from typing import Any
+from typing import Any, Optional
 
 from peewee import DoesNotExist
 
@@ -83,10 +84,14 @@ class EmbeddingMaintainer(threading.Thread):
         config: FrigateConfig,
         metrics: DataProcessorMetrics | None,
         stop_event: MpEvent,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
     ) -> None:
         super().__init__(name="embeddings_maintainer")
         self.config = config
         self.metrics = metrics
+        self.face_request_queue = face_request_queue
+        self.face_response_queue = face_response_queue
         self.embeddings = None
         self.config_updater = CameraConfigUpdateSubscriber(
             self.config,
@@ -164,7 +169,12 @@ class EmbeddingMaintainer(threading.Thread):
             logger.debug("Face recognition enabled, initializing FaceRealTimeProcessor")
             self.realtime_processors.append(
                 FaceRealTimeProcessor(
-                    self.config, self.requestor, self.event_metadata_publisher, metrics
+                    self.config,
+                    self.requestor,
+                    self.event_metadata_publisher,
+                    metrics,
+                    face_request_queue=self.face_request_queue,
+                    face_response_queue=self.face_response_queue,
                 )
             )
             logger.debug("FaceRealTimeProcessor initialized successfully")
