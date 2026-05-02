@@ -200,6 +200,86 @@ class HailoAsyncInference:
                 job.wait(100)
 
 
+# ----------------- _HailoFaceInferenceEngine ----------------- #
+class _HailoFaceInferenceEngine:
+    """Synchronous ArcFace inference helper that runs on an existing,
+    externally-owned VDevice. Used by HailoFaceProxyServer to satisfy face
+    embedding requests from the embeddings worker without claiming a second
+    VDevice. The YOLO detector and this engine share the same VDevice; the
+    HailoRT scheduler (ROUND_ROBIN, set by HailoAsyncInference at VDevice
+    creation time) multiplexes the two models.
+    """
+
+    def __init__(self, vdevice, hef_path: str):
+        try:
+            from hailo_platform import FormatType
+        except ModuleNotFoundError:
+            raise
+
+        self._vdevice = vdevice
+        self._hef_path = hef_path
+        self._infer_model = vdevice.create_infer_model(hef_path)
+        self._infer_model.set_batch_size(1)
+        self._infer_model.input().set_format_type(FormatType.UINT8)
+
+        self._configured_cm = None
+        self._configured = None
+        self._lock = threading.Lock()
+
+    def _ensure_configured(self):
+        if self._configured is None:
+            self._configured_cm = self._infer_model.configure()
+            self._configured = self._configured_cm.__enter__()
+
+    def infer(self, nhwc_uint8: np.ndarray) -> np.ndarray:
+        with self._lock:
+            self._ensure_configured()
+
+            output_buffers = {}
+            for output_info in self._infer_model._output_names:
+                output_buffers[output_info] = np.empty(
+                    self._infer_model.output(output_info).shape,
+                    dtype=np.float32,
+                )
+
+            bindings = self._configured.create_bindings(
+                output_buffers=output_buffers
+            )
+            bindings.input().set_buffer(np.ascontiguousarray(nhwc_uint8[0]))
+
+            self._configured.wait_for_async_ready(timeout_ms=10000)
+
+            done = threading.Event()
+            error_holder: Dict[str, Optional[Exception]] = {"err": None}
+
+            def _cb(completion_info):
+                if completion_info.exception:
+                    error_holder["err"] = completion_info.exception
+                done.set()
+
+            job = self._configured.run_async([bindings], _cb)
+            job.wait(10000)
+            done.wait(timeout=10.0)
+
+            if error_holder["err"] is not None:
+                raise RuntimeError(
+                    f"ArcFace inference failed: {error_holder['err']}"
+                )
+
+            # Return the first (and only) output buffer reshaped to (1, 512).
+            embedding = next(iter(output_buffers.values()))
+            return np.asarray(embedding, dtype=np.float32).reshape((1, -1))
+
+    def close(self):
+        if self._configured_cm is not None:
+            try:
+                self._configured_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._configured = None
+            self._configured_cm = None
+
+
 # ----------------- HailoDetector Class ----------------- #
 class HailoDetector(DetectionApi):
     type_key = DETECTOR_KEY
@@ -264,6 +344,58 @@ class HailoDetector(DetectionApi):
         except Exception as e:
             logger.error(f"[INIT] Failed to initialize HailoAsyncInference: {e}")
             raise
+
+        # Optional: load ArcFace MobileFaceNet on the same VDevice and expose
+        # it via HailoFaceProxyServer so the embeddings worker process can
+        # run face_recognition on the NPU. Hailo-8 / 8L only allows one
+        # VDevice handle per chip per process, so if face_recognition.device
+        # is set to "hailo" the embeddings worker cannot create its own
+        # VDevice — it has to talk to the detector process.
+        # Triggered by an env var so HailoDetector doesn't have to plumb the
+        # full FrigateConfig (it only ever receives BaseDetectorConfig).
+        # Frigate's main process or the operator sets the env when
+        # face_recognition.device == "hailo".
+        self._face_proxy = None
+        if os.environ.get("FRIGATE_HAILO_FACE_RECOGNITION") == "1":
+            try:
+                self._start_face_recognition_proxy()
+            except Exception as e:
+                logger.error(
+                    f"[INIT] Failed to start Hailo face recognition proxy: "
+                    f"{e}. The detector will continue serving YOLO; "
+                    f"face_recognition will not work on the NPU until this "
+                    f"is resolved."
+                )
+
+    def _start_face_recognition_proxy(self):
+        """Load arcface_mobilefacenet.hef on the VDevice already held by the
+        YOLO inference engine and start a loopback TCP proxy so the
+        embeddings worker can run face inference on the chip.
+        """
+        from frigate.embeddings.hailo_face_proxy import HailoFaceProxyServer
+
+        hef_dir = os.path.join(MODEL_CACHE_DIR, "facedet")
+        hef_path = os.path.join(hef_dir, "arcface_mobilefacenet.hef")
+        if not os.path.exists(hef_path):
+            os.makedirs(hef_dir, exist_ok=True)
+            url = (
+                "https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/"
+                "ModelZoo/Compiled/v2.18.0/hailo8l/arcface_mobilefacenet.hef"
+            )
+            logger.info(f"[face-proxy] Downloading ArcFace HEF from {url}")
+            urllib.request.urlretrieve(url, hef_path)
+
+        # The YOLO inference engine has already created a VDevice. Reuse it
+        # so we don't trigger HAILO_OUT_OF_PHYSICAL_DEVICES from this side.
+        vdevice = self.inference_engine.target
+
+        face_engine = _HailoFaceInferenceEngine(vdevice, hef_path)
+        self._face_proxy = HailoFaceProxyServer(face_engine.infer)
+        self._face_proxy.start()
+        logger.info(
+            "[face-proxy] ArcFace face recognition proxy ready "
+            "(co-located with YOLO on the Hailo VDevice)"
+        )
 
     def set_path_and_url(self, path: str = None):
         if not path:
