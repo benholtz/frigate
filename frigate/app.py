@@ -101,6 +101,24 @@ class FrigateApp:
         self.detectors: dict[str, ObjectDetectProcess] = {}
         self.detection_shms: list[mp.shared_memory.SharedMemory] = []
         self.log_queue: Queue = mp.Queue()
+
+        # When face_recognition.device == "hailo" the embeddings worker
+        # process forwards face crops to a worker thread inside the Hailo
+        # detector process, which runs ArcFace on the same VDevice that
+        # serves YOLO. (Hailo-8 / 8L allow only one VDevice per chip per
+        # process, so the embeddings worker cannot run the model itself.)
+        # Queues only exist when the trigger is set, so non-Hailo
+        # deployments pay nothing.
+        if (
+            config.face_recognition.enabled
+            and config.face_recognition.device
+            and config.face_recognition.device.lower() == "hailo"
+        ):
+            self.face_request_queue: Optional[Queue] = mp.Queue()
+            self.face_response_queue: Optional[Queue] = mp.Queue()
+        else:
+            self.face_request_queue = None
+            self.face_response_queue = None
         self.camera_metrics: DictProxy = self.metrics_manager.dict()
         self.embeddings_metrics: DataProcessorMetrics | None = (
             DataProcessorMetrics(
@@ -248,7 +266,11 @@ class FrigateApp:
     def init_embeddings_manager(self) -> None:
         # always start the embeddings process
         embedding_process = EmbeddingProcess(
-            self.config, self.embeddings_metrics, self.stop_event
+            self.config,
+            self.embeddings_metrics,
+            self.stop_event,
+            face_request_queue=self.face_request_queue,
+            face_response_queue=self.face_response_queue,
         )
         self.embedding_process = embedding_process
         embedding_process.start()
@@ -387,6 +409,8 @@ class FrigateApp:
                 self.config,
                 detector_config,
                 self.stop_event,
+                face_request_queue=self.face_request_queue,
+                face_response_queue=self.face_response_queue,
             )
 
     def start_ptz_autotracker(self) -> None:
