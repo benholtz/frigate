@@ -557,11 +557,124 @@ class RKNNModelRunner(BaseModelRunner):
                 pass
 
 
+class HailoModelRunner(BaseModelRunner):
+    """Run models on the Hailo NPU.
+
+    Wraps the asynchronous HailoAsyncInference engine (originally written for
+    the YOLO detector path) with a synchronous request/response interface so
+    embeddings can call it from a worker process exactly like the ORT/RKNN
+    runners. The HailoRT scheduler (HailoSchedulingAlgorithm.ROUND_ROBIN)
+    multiplexes models on a single VDevice, so the detector and this runner
+    can share the chip without explicit coordination.
+    """
+
+    INPUT_NAME = "data"
+
+    def __init__(self, model_path: str, model_type: str = None):
+        self.model_path = model_path
+        self.model_type = model_type
+        self._engine = None
+        self._worker = None
+        self._input_store = None
+        self._response_store = None
+        self._input_width = None
+        self._load_model()
+
+    def _load_model(self):
+        # Lazy imports keep the rest of the module importable on hosts
+        # without HailoRT installed.
+        from frigate.detectors.plugins.hailo8l import HailoAsyncInference
+        from frigate.object_detection.util import RequestStore, ResponseStore
+
+        self._input_store = RequestStore()
+        self._response_store = ResponseStore()
+
+        try:
+            self._engine = HailoAsyncInference(
+                hef_path=self.model_path,
+                input_store=self._input_store,
+                output_store=self._response_store,
+                batch_size=1,
+                input_type="UINT8",
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to initialize Hailo runner for {self.model_path}: {e}"
+            )
+
+        # Cache input width from the HEF so callers can query without touching
+        # the engine while the worker is mid-inference.
+        input_shape = self._engine.get_input_shape()
+        # HEF input shape is (H, W, C) for image models.
+        self._input_width = int(input_shape[1]) if len(input_shape) >= 2 else 0
+
+        self._worker = threading.Thread(
+            target=self._engine.run,
+            name="hailo-runner",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def get_input_names(self) -> list[str]:
+        return [self.INPUT_NAME]
+
+    def get_input_width(self) -> int:
+        return self._input_width or 0
+
+    def run(self, input: dict[str, Any]) -> Any | None:
+        if self.INPUT_NAME not in input:
+            raise ValueError(
+                f"HailoModelRunner expects '{self.INPUT_NAME}' key in inputs"
+            )
+
+        tensor = input[self.INPUT_NAME]
+
+        # The current Hailo embedding integration is ArcFace-shaped: callers
+        # produce NCHW float32 normalised to (x/127.5)-1. Hailo HEFs expect
+        # NHWC uint8 [0,255], so undo the normalisation at the boundary
+        # (mirrors the RKNN arcface path above).
+        if (
+            self.model_type
+            and "arcface" in self.model_type
+            and len(tensor.shape) == 4
+        ):
+            if tensor.shape[1] == 3:
+                tensor = np.transpose(tensor, (0, 2, 3, 1))
+            tensor = ((tensor + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+
+        # HailoAsyncInference processes one frame at a time (batch_size=1).
+        request_id = self._input_store.put(tensor[0])
+
+        try:
+            _, embedding = self._response_store.get(request_id, timeout=10.0)
+        except TimeoutError:
+            raise RuntimeError(
+                f"Hailo inference timed out for {self.model_path}"
+            )
+
+        # Match the ONNX runner's contract: list of arrays, one per output.
+        if isinstance(embedding, dict):
+            return list(embedding.values())
+        return [embedding]
+
+    def __del__(self):
+        # Signal the worker loop to exit cleanly. HailoAsyncInference.run()
+        # breaks out of its while loop when batch_data is None.
+        try:
+            if self._input_store is not None:
+                self._input_store.input_queue.put(None)
+        except Exception:
+            pass
+
+
 def get_optimized_runner(
     model_path: str, device: str | None, model_type: str, **kwargs
 ) -> BaseModelRunner:
     """Get an optimized runner for the hardware."""
     device = device or "AUTO"
+
+    if device.lower() == "hailo":
+        return HailoModelRunner(model_path, model_type=model_type)
 
     if device != "CPU" and is_rknn_compatible(model_path):
         rknn_path = auto_convert_model(model_path)
