@@ -45,6 +45,8 @@ class BaseLocalDetector(ObjectDetector):
         detector_config: Optional[BaseDetectorConfig] = None,
         labels: Optional[str] = None,
         stop_event: Optional[MpEvent] = None,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
     ) -> None:
         self.fps = EventsPerSecond()
         if labels is None:
@@ -64,6 +66,19 @@ class BaseLocalDetector(ObjectDetector):
         # If the detector supports stop_event, pass it
         if hasattr(self.detect_api, "set_stop_event") and stop_event:
             self.detect_api.set_stop_event(stop_event)
+
+        # If the detector supports proxying face_recognition inference
+        # (currently only the Hailo plugin does), hand it the queue pair.
+        # Same duck-typing shape as set_stop_event above. Other plugins
+        # ignore these kwargs.
+        if (
+            hasattr(self.detect_api, "set_face_inference_queues")
+            and face_request_queue is not None
+            and face_response_queue is not None
+        ):
+            self.detect_api.set_face_inference_queues(
+                face_request_queue, face_response_queue
+            )
 
     def _transform_input(self, tensor_input: np.ndarray) -> np.ndarray:
         if self.input_transform:
@@ -121,6 +136,8 @@ class DetectorRunner(FrigateProcess):
         config: FrigateConfig,
         detector_config: BaseDetectorConfig,
         stop_event: MpEvent,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
     ) -> None:
         super().__init__(stop_event, PROCESS_PRIORITY_HIGH, name=name, daemon=True)
         self.detection_queue = detection_queue
@@ -129,6 +146,8 @@ class DetectorRunner(FrigateProcess):
         self.start_time = start_time
         self.config = config
         self.detector_config = detector_config
+        self.face_request_queue = face_request_queue
+        self.face_response_queue = face_response_queue
         self.outputs: dict[str, Any] = {}
 
     def create_output_shm(self, name: str) -> None:
@@ -140,7 +159,11 @@ class DetectorRunner(FrigateProcess):
         self.pre_run_setup(self.config.logger)
 
         frame_manager = SharedMemoryFrameManager()
-        object_detector = LocalObjectDetector(detector_config=self.detector_config)
+        object_detector = LocalObjectDetector(
+            detector_config=self.detector_config,
+            face_request_queue=self.face_request_queue,
+            face_response_queue=self.face_response_queue,
+        )
         detector_publisher = ObjectDetectorPublisher()
 
         for name in self.cameras:
@@ -323,6 +346,8 @@ class ObjectDetectProcess:
         config: FrigateConfig,
         detector_config: BaseDetectorConfig,
         stop_event: MpEvent,
+        face_request_queue: Optional[Queue] = None,
+        face_response_queue: Optional[Queue] = None,
     ):
         self.name = name
         self.cameras = cameras
@@ -333,6 +358,8 @@ class ObjectDetectProcess:
         self.config = config
         self.detector_config = detector_config
         self.stop_event = stop_event
+        self.face_request_queue = face_request_queue
+        self.face_response_queue = face_response_queue
         self.start_or_restart()
 
     def stop(self) -> None:
@@ -378,6 +405,8 @@ class ObjectDetectProcess:
                 self.config,
                 self.detector_config,
                 self.stop_event,
+                face_request_queue=self.face_request_queue,
+                face_response_queue=self.face_response_queue,
             )
         self.detect_process.start()
 
