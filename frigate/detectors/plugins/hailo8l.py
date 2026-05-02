@@ -212,15 +212,23 @@ class _HailoFaceInferenceEngine:
 
     def __init__(self, vdevice, hef_path: str):
         try:
-            from hailo_platform import FormatType
+            from hailo_platform import HEF, FormatType
         except ModuleNotFoundError:
             raise
 
         self._vdevice = vdevice
         self._hef_path = hef_path
+        # Hold a HEF reference too — InferModel's output enumeration goes
+        # through HEF's vstream infos, not a private attribute on InferModel.
+        self._hef = HEF(hef_path)
         self._infer_model = vdevice.create_infer_model(hef_path)
         self._infer_model.set_batch_size(1)
         self._infer_model.input().set_format_type(FormatType.UINT8)
+
+        # Cache output names and shapes once (HEF metadata is static).
+        self._output_names = [
+            info.name for info in self._hef.get_output_vstream_infos()
+        ]
 
         self._configured_cm = None
         self._configured = None
@@ -235,12 +243,13 @@ class _HailoFaceInferenceEngine:
         with self._lock:
             self._ensure_configured()
 
-            output_buffers = {}
-            for output_info in self._infer_model._output_names:
-                output_buffers[output_info] = np.empty(
-                    self._infer_model.output(output_info).shape,
+            output_buffers = {
+                name: np.empty(
+                    self._infer_model.output(name).shape,
                     dtype=np.float32,
                 )
+                for name in self._output_names
+            }
 
             bindings = self._configured.create_bindings(
                 output_buffers=output_buffers
@@ -374,13 +383,19 @@ class HailoDetector(DetectionApi):
         """
         from frigate.embeddings.hailo_face_proxy import HailoFaceProxyServer
 
+        # Pick the HEF compiled for the actual chip variant. Hailo-8 and
+        # Hailo-8L are different SKUs (different TOPS budgets); HailoRT
+        # warns and falls back to lower performance if you load an 8L HEF
+        # on an 8 device. ARCH was set by detect_hailo_arch() in __init__.
+        global ARCH
+        arch_dir = "hailo8" if ARCH == "hailo8" else "hailo8l"
         hef_dir = os.path.join(MODEL_CACHE_DIR, "facedet")
         hef_path = os.path.join(hef_dir, "arcface_mobilefacenet.hef")
         if not os.path.exists(hef_path):
             os.makedirs(hef_dir, exist_ok=True)
             url = (
-                "https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/"
-                "ModelZoo/Compiled/v2.18.0/hailo8l/arcface_mobilefacenet.hef"
+                f"https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/"
+                f"ModelZoo/Compiled/v2.18.0/{arch_dir}/arcface_mobilefacenet.hef"
             )
             logger.info(f"[face-proxy] Downloading ArcFace HEF from {url}")
             urllib.request.urlretrieve(url, hef_path)
