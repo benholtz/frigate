@@ -119,7 +119,9 @@ Navigate to <NavPath path="Settings > Enrichments > Face recognition" />.
   - Default: `200`
 - **Blur confidence filter**: Enables a filter that calculates how blurry the face is and adjusts the confidence based on this.
   - Default: `True`
-- **Device**: Target a specific device to run the face recognition model on (multi-GPU installation). This setting is only applicable when using the `large` model. See [onnxruntime's provider options](https://onnxruntime.ai/docs/execution-providers/).
+- **Device**: Target a specific device to run the face recognition model on. This setting is only applicable when using the `large` model.
+  - Accepts ONNX Runtime execution provider hints (`CPU`, `GPU`, `NPU`, `AUTO`) — see [onnxruntime's provider options](https://onnxruntime.ai/docs/execution-providers/).
+  - Set to `hailo` to run a precompiled ArcFace MobileFaceNet model on a Hailo-8 / Hailo-8L NPU. The HEF is downloaded from the Hailo Model Zoo on first use and shares the chip with the existing Hailo object detector via the HailoRT scheduler. Same 99.4% LFW accuracy as the ONNX model at INT8. Requires a Hailo detector to be configured (the face model is co-located on its VDevice).
   - Default: `None`
 
 </TabItem>

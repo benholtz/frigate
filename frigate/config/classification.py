@@ -305,7 +305,15 @@ class FaceRecognitionConfig(FrigateBaseModel):
     device: Optional[str] = Field(
         default=None,
         title="Device",
-        description="This is an override, to target a specific device. See https://onnxruntime.ai/docs/execution-providers/ for more information",
+        description=(
+            "Override the device used for face recognition inference. "
+            "Accepts ONNX Runtime execution provider hints (CPU, GPU, NPU, "
+            "AUTO - see https://onnxruntime.ai/docs/execution-providers/) "
+            "or 'hailo' to run a precompiled ArcFace MobileFaceNet model "
+            "on a Hailo-8 / Hailo-8L NPU. The Hailo path co-locates the "
+            "face model on the same VDevice the YOLO detector uses, so a "
+            "Hailo detector must also be configured."
+        ),
     )
 
 
