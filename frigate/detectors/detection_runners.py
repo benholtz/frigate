@@ -5,6 +5,7 @@ import os
 import platform
 import threading
 from abc import ABC, abstractmethod
+from multiprocessing import Queue
 from typing import Any
 
 import numpy as np
@@ -555,6 +556,71 @@ class RKNNModelRunner(BaseModelRunner):
                 self.rknn.release()
             except Exception:
                 pass
+
+
+class HailoFaceModelRunner(BaseModelRunner):
+    """ArcFace face embedding runner that proxies inference to a worker
+    thread inside the Hailo detector process via a multiprocessing.Queue
+    pair.
+
+    Hailo-8 / 8L only allow one VDevice handle per chip per process, so
+    the embeddings worker cannot create its own VDevice for ArcFace.
+    The detector process (which already holds the chip's VDevice for
+    YOLO) loads the ArcFace HEF on the same VDevice and serves face
+    inference requests forwarded over these queues. HailoRT's
+    ROUND_ROBIN scheduler multiplexes the two models on the chip.
+
+    Single-threaded by design: face_recognition runs from one
+    EmbeddingMaintainer thread, so a request/response lock is enough
+    and we don't need request_id correlation.
+    """
+
+    INPUT_NAME = "data"
+    # ArcFace MobileFaceNet input width (Hailo Model Zoo HEF)
+    INPUT_WIDTH = 112
+    REQUEST_TIMEOUT_SECONDS = 10.0
+
+    def __init__(self, request_queue: Queue, response_queue: Queue):
+        self._request_queue = request_queue
+        self._response_queue = response_queue
+        self._lock = threading.Lock()
+
+    def get_input_names(self) -> list[str]:
+        return [self.INPUT_NAME]
+
+    def get_input_width(self) -> int:
+        return self.INPUT_WIDTH
+
+    def run(self, input: dict[str, Any]) -> Any | None:
+        if self.INPUT_NAME not in input:
+            raise ValueError(
+                f"HailoFaceModelRunner expects '{self.INPUT_NAME}' key in inputs"
+            )
+
+        tensor = input[self.INPUT_NAME]
+
+        # ArcFace pre-processing: callers produce NCHW float32 in
+        # (x/127.5)-1 range; Hailo HEFs expect NHWC uint8 [0,255].
+        # Mirrors the inverse normalisation in RKNNModelRunner.run().
+        if len(tensor.shape) == 4 and tensor.shape[1] == 3:
+            tensor = np.transpose(tensor, (0, 2, 3, 1))
+        tensor = ((tensor + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+
+        with self._lock:
+            self._request_queue.put(tensor[0])
+            response = self._response_queue.get(
+                timeout=self.REQUEST_TIMEOUT_SECONDS
+            )
+
+        if response is None:
+            raise RuntimeError("Hailo face proxy returned no response")
+
+        status, payload = response
+        if status != 0:
+            raise RuntimeError(f"Hailo face inference failed: {payload}")
+
+        # Match the ONNX runner's contract: list of arrays, one per output.
+        return [payload]
 
 
 def get_optimized_runner(
