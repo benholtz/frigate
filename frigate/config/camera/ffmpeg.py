@@ -63,6 +63,11 @@ class FfmpegConfig(FrigateBaseModel):
         title="Time in seconds to wait before FFmpeg retries connecting to the camera.",
         gt=0.0,
     )
+    no_frames_threshold: float = Field(
+        default=20.0,
+        title="Seconds without a decoded frame before the camera watchdog kills and restarts FFmpeg.",
+        gt=0.0,
+    )
     apple_compatibility: bool = Field(
         default=False,
         title="Set tag on HEVC (H.265) recording stream to improve compatibility with Apple players.",

@@ -349,11 +349,15 @@ class CameraWatchdog(threading.Thread):
                         f"{self.config.name} exceeded fps limit. Exiting ffmpeg..."
                     )
                     self.reset_capture_thread(drain_output=False)
-            elif now - self.capture_thread.current_frame.value > 20:
+            elif (
+                now - self.capture_thread.current_frame.value
+                > self.config.ffmpeg.no_frames_threshold
+            ):
                 self.requestor.send_data(f"{self.config.name}/status/detect", "offline")
                 self.camera_fps.value = 0
                 self.logger.info(
-                    f"No frames received from {self.config.name} in 20 seconds. Exiting ffmpeg..."
+                    f"No frames received from {self.config.name} in "
+                    f"{self.config.ffmpeg.no_frames_threshold:g} seconds. Exiting ffmpeg..."
                 )
                 self.reset_capture_thread()
             else:
