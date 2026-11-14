@@ -186,6 +186,10 @@
       "label": "FFmpeg retry time",
       "description": "Seconds to wait before attempting to reconnect a camera stream after failure. Default is 10."
     },
+    "no_frames_threshold": {
+      "label": "No frames timeout",
+      "description": "Seconds without a decoded frame before the camera watchdog restarts FFmpeg. Default is 20."
+    },
     "apple_compatibility": {
       "label": "Apple compatibility",
       "description": "Enable HEVC tagging for better Apple player compatibility when recording H.265."

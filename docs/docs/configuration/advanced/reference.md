@@ -292,6 +292,9 @@ ffmpeg:
   # If set too high, then if a ffmpeg crash or camera stream timeout occurs, you could potentially lose up to a maximum of retry_interval second(s) of footage
   # NOTE: this can be a useful setting for Wireless / Battery cameras to reduce how much footage is potentially lost during a connection timeout.
   retry_interval: 10
+  # Optional: Seconds without a decoded frame before the camera watchdog restarts ffmpeg. (default: shown below)
+  # NOTE: raise this for sources that pause briefly while healthy, such as WebRTC bridges that renegotiate their upstream session.
+  no_frames_threshold: 20
   # Optional: Set tag on HEVC (H.265) recording stream to improve compatibility with Apple players. (default: shown below)
   apple_compatibility: false
   # Optional: Set the index of the GPU to use for hardware acceleration. (default: shown below)

@@ -76,6 +76,12 @@ class FfmpegConfig(FrigateBaseModel):
         description="Seconds to wait before attempting to reconnect a camera stream after failure. Default is 10.",
         gt=0.0,
     )
+    no_frames_threshold: float = Field(
+        default=20.0,
+        title="No frames timeout",
+        description="Seconds without a decoded frame before the camera watchdog restarts FFmpeg. Default is 20.",
+        gt=0.0,
+    )
     apple_compatibility: bool = Field(
         default=False,
         title="Apple compatibility",
